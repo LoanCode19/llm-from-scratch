@@ -1,10 +1,29 @@
+import re
+import time
 from collections import Counter
+
+WORD_PATTERN = re.compile(r" ?\w+| ?[^\w\s]+|\s+")
+
 
 def getBestPair(tokens):
     return Counter(zip(tokens, tokens[1:])).most_common(1)[0][0]
 
 
+def getBestPairWords(wordsTokens, wordsFreq):
+    '''Récupère la paire la plus commune parmis tous les mots 
+    pondérée par la fréquence des mots la contenant'''
+    pairs = Counter()
+    for tokens, freq in zip(wordsTokens, wordsFreq):
+        for pair in zip(tokens, tokens[1:]):
+            pairs[pair] += freq
+    if not pairs:
+        return None
+    return pairs.most_common(1)[0][0]
+
+
 def merging(best_pair, tokens, newToken):
+    '''Remplacement de l'ancienne paire de bytes la plus fréquente dans notre
+    liste par le nouveau token : newToken'''
     resultingTokens = []
     i = 0
     while i < len(tokens):
@@ -18,6 +37,7 @@ def merging(best_pair, tokens, newToken):
 
 
 def decode(encodedTokens, encodingDico):
+    '''Fonction de décodage d'un texte tokenizé'''
     decodedTokens = []
     for num in encodedTokens:
         recGetDec(decodedTokens, num, encodingDico)
@@ -25,6 +45,7 @@ def decode(encodedTokens, encodingDico):
 
 
 def recGetDec(decodedTokens, num, encodingDico):
+    ''' Obtenir le decodage de manière récursive sur un token (on décode le token de gauche puis de droite)'''
     pair = encodingDico.get(num)
     if num >= 256:
         recGetDec(decodedTokens, pair[0], encodingDico)
@@ -34,65 +55,137 @@ def recGetDec(decodedTokens, num, encodingDico):
     return
 
 
-def encode(tokens, encodingDico, vocabulary_size):
+def encodeOld(tokens, encodingDico, vocabulary_size):
+    '''version naïve de l'encodage, token par token'''
     intermediateEncoding = list(tokens)
-    for num in range(256, vocabulary_size):
+    for num in range(256, vocabulary_size): #encodage par ordre d'"importance"
         intermediateEncoding = merging(encodingDico[num], intermediateEncoding, num)
     return intermediateEncoding
 
 
+def encodeWord(word, inverseEncodingDico):
+    '''Encodage des tokens mot par mots'''
+    wordTokens = list(word.encode("utf-8"))#conversion du mot en ses bytes associés 
+    while len(wordTokens) >= 2: #pas de BPE si pas de paire
+        bestPair = min(
+            zip(wordTokens, wordTokens[1:]),
+            key=lambda pair: inverseEncodingDico.get(pair, float("inf")),
+        ) #On prend la paire qui possède un encodage avec l'indice le plus petit 
+        if bestPair not in inverseEncodingDico:#si tout est encodé dans le mot
+            return wordTokens
+        else:
+            wordTokens = merging(bestPair, wordTokens, inverseEncodingDico[bestPair])
+    return wordTokens
+
+
+def encode(text, encodingDico):
+    '''Encode tout le texte selon le dico d'encodage donné (encodage par mot)'''
+    words = WORD_PATTERN.findall(text) #division du texte en mots
+    encodedTokens = []
+    encodeCache = {}
+    inverseEncodingDico = {v: k for k, v in encodingDico.items()}
+    for word in words:
+        if encodeCache.get(word, 0) != 0:
+            encodedTokens += encodeCache[word]
+        else:
+            wordTokens = encodeWord(word, inverseEncodingDico)
+            encodeCache[word] = wordTokens
+            encodedTokens += wordTokens
+    return encodedTokens
+
+
+def splitWords(text):
+    return Counter(WORD_PATTERN.findall(text))
+
+
 def train(text, vocabulary_size):
-    tokens = list(text.encode("utf-8"))
+    wordsCount = splitWords(text)
+    wordsTokens = [list(word.encode("utf-8")) for word in wordsCount]
+    wordsFreq = list(wordsCount.values())
     encodingDico = {}
     for num in range(256, vocabulary_size):
+        bestPair = getBestPairWords(wordsTokens, wordsFreq)
+        if bestPair is None:
+            break
+        encodingDico[num] = bestPair
+        wordsTokens = [merging(bestPair, tokens, num) for tokens in wordsTokens]
+    return encodingDico
+
+
+def trainOld(text, vocabulary_size):
+    tokens = list(text.encode("utf-8"))#On récupère les tokens 
+    encodingDico = {}
+    for num in range(256, vocabulary_size): #BPE
         bestPair = getBestPair(tokens)
         encodingDico[num] = bestPair
         tokens = merging(bestPair, tokens, num)
     return encodingDico
 
 
-def testText(text, encodingDico, vocabulary_size):
+def testText(text, encodingDico):
     rawTokens = list(text.encode("utf-8"))
-    encodedTokens = encode(rawTokens, encodingDico, vocabulary_size)
+    encodedTokens = encode(text, encodingDico)
     decodedText = bytes(decode(encodedTokens, encodingDico)).decode("utf-8")
-    print("Original :", text)
-    print("Decode   :", decodedText)
+    print("Original :", text[:200])
+    print("Decode   :", decodedText[:200])
     print("Identique :", decodedText == text)
-    print("Taille :", len(rawTokens), "bytes ->", len(encodedTokens), "tokens",
-          f"(ratio {len(rawTokens) / len(encodedTokens):.2f})")
+    print(
+        "Taille :",
+        len(rawTokens),
+        "bytes ->",
+        len(encodedTokens),
+        "tokens",
+        f"(ratio {len(rawTokens) / len(encodedTokens):.2f})",
+    )
     print()
 
 
-if __name__ == "__main__":
-    vocabulary_size = 300
-
-    trainingText = (
-        "Le tokenizer apprend les paires de bytes les plus fréquentes dans le texte. "
-        "À chaque étape, il fusionne la paire la plus fréquente en un nouveau token, "
-        "puis il recommence sur le texte compressé. Plus le texte est long, plus les "
-        "fusions deviennent intéressantes : les mots courants comme « le », « la », "
-        "« les », « des », « est » ou « que » finissent par devenir un seul token. "
-        "Les caractères accentués comme é, è, à ou ç prennent deux bytes en UTF-8, "
-        "donc le tokenizer apprend vite à les regrouper. Les emojis comme 😀 en prennent "
-        "quatre. Le but est de réduire la longueur des séquences tout en gardant un "
-        "vocabulaire de taille raisonnable pour le réseau de neurones qui viendra après."
+def speedTest(text, vocabulary_size):
+    print(
+        f"=== Test de vitesse ({len(text.encode('utf-8'))} bytes, vocabulaire {vocabulary_size}) ==="
     )
-    encodingDico = train(trainingText, vocabulary_size)
+    for trainFunction in (trainOld, train):
+        start = time.perf_counter()
+        trainFunction(text, vocabulary_size)
+        print(f"{trainFunction.__name__} : {time.perf_counter() - start:.2f} s")
+    print()
 
-    print("Merges appris :")
-    for num, pair in encodingDico.items():
+
+def encodeSpeedTest(text, encodingDico, vocabulary_size):
+    print(f"=== Test de vitesse de l'encodage ({len(text.encode('utf-8'))} bytes) ===")
+    start = time.perf_counter()
+    newTokens = encode(text, encodingDico)
+    print(f"encode : {time.perf_counter() - start:.2f} s, {len(newTokens)} tokens")
+
+if __name__ == "__main__":
+    vocabulary_size = 1000
+
+    with open("data/miserables_train.txt", encoding="utf-8") as f:
+        trainingText = f.read()
+    with open("data/miserables_test.txt", encoding="utf-8") as f:
+        testingText = f.read()
+
+    speedTest(trainingText[:500_000], 400)
+
+    start = time.perf_counter()
+    encodingDico = train(trainingText, vocabulary_size)
+    print(
+        f"Entraînement complet : {time.perf_counter() - start:.2f} s, {len(encodingDico)} merges"
+    )
+    print()
+
+    print("20 derniers merges appris :")
+    for num, pair in list(encodingDico.items())[-20:]:
         merged = bytes(decode([num], encodingDico)).decode("utf-8", errors="replace")
         print(num, pair, repr(merged))
     print()
 
-    print("=== Texte d'entrainement ===")
-    testText(trainingText, encodingDico, vocabulary_size)
+    print("=== Extrait du texte d'entraînement (tomes I à IV) ===")
+    testText(trainingText[100_000:110_000], encodingDico)
 
-    print("=== Nouveau texte ===")
-    otherText = (
-        "Est-ce que le tokenizer marche aussi sur un texte qu'il n'a jamais vu ? "
-        "Les mots fréquents devraient être compressés, et les caractères inconnus "
-        "comme 🚀 ou ñ restent de simples bytes."
-    )
-    testText(otherText, encodingDico, vocabulary_size)
+    print("=== Extrait jamais vu (tome V) ===")
+    testText(testingText[100_000:110_000], encodingDico)
 
+    encodeSpeedTest(testingText[:50_000], encodingDico, vocabulary_size)
+
+    print("=== Caractères inconnus ===")
